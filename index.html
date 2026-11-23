@@ -169,6 +169,17 @@ const app=initializeApp(config),auth=getAuth(app),db=getFirestore(app),provider=
 const isMember=(x,u)=>x.ownerId===u||Array.isArray(x.memberIds)&&x.memberIds.includes(u);
 // Merge only changed fields/items, so edits to different itinerary entries don't overwrite each other.
 const equal=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
+// Firestore rejects undefined anywhere inside a nested object or array.
+// Drop undefined object properties; preserve array positions as null.
+function firestoreSafe(value){
+ if(value===undefined)return null;
+ if(Array.isArray(value))return value.map(firestoreSafe);
+ if(value&&typeof value==='object'){
+  if(value instanceof Date)return value;
+  return Object.fromEntries(Object.entries(value).filter(([,v])=>v!==undefined).map(([k,v])=>[k,firestoreSafe(v)]));
+ }
+ return value;
+}
 function mergeTrip(base,local,remote){
  const merged=structuredClone(remote||{});const rootKeys=new Set([...Object.keys(base||{}),...Object.keys(local||{})]);
  for(const key of rootKeys){
@@ -236,7 +247,7 @@ restoreTrip:async id=>{const u=auth.currentUser;if(!u)throw Error('Belum login')
 listTrips:async()=>{let u=auth.currentUser;if(!u)throw Error('Belum login');let [own,shared]=await Promise.all([getDocs(query(collection(db,'trips'),where('ownerId','==',u.uid))),getDocs(query(collection(db,'trips'),where('memberIds','array-contains',u.uid)))]);let map=new Map([...own.docs,...shared.docs].map(d=>[d.id,{id:d.id,...d.data()}]));return [...map.values()].sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0))},
 loadTrip:async id=>{let snap=await getDoc(doc(db,'trips',id));if(!snap.exists())throw Error('Trip tidak ditemukan');let x=snap.data();if(!isMember(x,auth.currentUser?.uid)||x.deletedAt)throw Error('Trip tidak tersedia atau akses ditolak');return {payload:x.payload,meta:{ownerId:x.ownerId,memberIds:x.memberIds||[],memberProfiles:x.memberProfiles||{}}}},
 createTrip:async payload=>{let u=auth.currentUser;if(!u)throw Error('Belum login');let ref=doc(collection(db,'trips'));await setDoc(ref,{ownerId:u.uid,memberIds:[],destination:payload.trip.destination,start:payload.trip.start,end:payload.trip.end,payload,createdAt:serverTimestamp(),updatedAt:serverTimestamp()});return ref.id},
-saveTrip:async(id,payload,base)=>{let u=auth.currentUser;if(!u)throw Error('Belum login');const ref=doc(db,'trips',id);return await runTransaction(db,async tx=>{const snap=await tx.get(ref);if(!snap.exists())throw Error('Trip sudah tidak tersedia');const record=snap.data();if(record.deletedAt||!isMember(record,u.uid))throw Error('Tidak punya akses ke trip ini');const merged=mergeTrip(base,payload,record.payload);tx.update(ref,{destination:merged.trip.destination,start:merged.trip.start,end:merged.trip.end,payload:merged,updatedAt:serverTimestamp()});return merged})},
+saveTrip:async(id,payload,base)=>{let u=auth.currentUser;if(!u)throw Error('Belum login');const ref=doc(db,'trips',id);return await runTransaction(db,async tx=>{const snap=await tx.get(ref);if(!snap.exists())throw Error('Trip sudah tidak tersedia');const record=snap.data();if(record.deletedAt||!isMember(record,u.uid))throw Error('Tidak punya akses ke trip ini');const merged=firestoreSafe(mergeTrip(base,payload,record.payload));if(!merged.trip?.destination||!merged.trip?.start||!merged.trip?.end)throw Error('Detail perjalanan tidak lengkap, penyimpanan dibatalkan.');tx.update(ref,{destination:merged.trip.destination,start:merged.trip.start,end:merged.trip.end,payload:merged,updatedAt:serverTimestamp()});return merged})},
 requestJoin:async id=>{let u=auth.currentUser;if(!u)throw Error('Login dulu');await setDoc(doc(db,'trips',id,'joinRequests',u.uid),{tripId:id,uid:u.uid,email:u.email||'',createdAt:serverTimestamp(),status:'pending'});return 'requested'},
 getRequests:async id=>{let u=auth.currentUser;let snap=await getDocs(collection(db,'trips',id,'joinRequests'));return snap.docs.map(x=>x.data()).filter(x=>x.status==='pending')},
 approve:async(id,uid)=>{let u=auth.currentUser;let ref=doc(db,'trips',id);let snap=await getDoc(ref);if(snap.data()?.ownerId!==u?.uid)throw Error('Hanya pemilik trip');let members=snap.data().memberIds||[];if(!members.includes(uid))await updateDoc(ref,{memberIds:[...members,uid]});await updateDoc(doc(db,'trips',id,'joinRequests',uid),{status:'approved'})}
