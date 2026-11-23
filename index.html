@@ -66,18 +66,35 @@ const $=s=>document.querySelector(s),esc=s=>String(s??'').replace(/[&<>"']/g,c=>
 const seed={trip:{destination:'Bali, Indonesia',start:'2026-12-20',end:'2026-12-23',budget:7500000,travelers:['Aku','Pasangan']},activities:[{id:1,date:'2026-12-20',time:'08:00',title:'Berangkat ke Bandara',location:'Bandara Soekarno-Hatta',note:'Pastikan tiket dan identitas sudah siap',category:'Transportasi'},{id:2,date:'2026-12-20',time:'13:00',title:'Check-in Hotel',location:'Seminyak, Bali',note:'Istirahat dan makan siang',category:'Akomodasi'},{id:3,date:'2026-12-21',time:'09:00',title:'Explore Ubud',location:'Ubud, Bali',note:'Jalan-jalan dan foto keluarga',category:'Wisata'}],expenses:[{id:4,title:'Tiket Pesawat',amount:2400000,category:'Transportasi'},{id:5,title:'Hotel',amount:1800000,category:'Akomodasi'}],packing:[{id:6,title:'Paspor / KTP',done:false},{id:7,title:'Tiket dan reservasi',done:true},{id:8,title:'Pakaian dan perlengkapan mandi',done:false},{id:9,title:'Charger dan powerbank',done:false}]};
 let data;try{data=JSON.parse(localStorage.getItem('voyage_v1'))||structuredClone(seed)}catch{data=structuredClone(seed)};let tab='home',selectedDay=data.trip.start;let activeTripId=null,tripList=[],cloudReady=false,cloudUser=null,cloudSaving=false,tripFilter='all',budgetView='expenses';let saveQueue=Promise.resolve();let tripMeta=null,joinRequests=[];let receiptDraft=null;let pendingWrites=0,remoteRevision=null,liveTripStop=null,liveListStop=null;let editingBase=null,saveError=false;
 const save=()=>{if(!activeTripId||!cloudReady){alert('Trip belum siap disimpan. Tunggu koneksi, lalu coba lagi.');return;}
- const id=activeTripId,snapshot=structuredClone(data),base=structuredClone(editingBase||data);
- editingBase=structuredClone(snapshot);pendingWrites++;cloudSaving=true;
+ const id=activeTripId,snapshot=structuredClone(data);
+ pendingWrites++;cloudSaving=true;
  const label=document.getElementById('clouduser');if(label)label.textContent='☁ Menyimpan…';
- saveQueue=saveQueue.catch(()=>{}).then(()=>window.voyageCloud.saveTrip(id,snapshot,base)).then(merged=>{
-   if(activeTripId===id&&!remoteRevision&&pendingWrites===1&&!document.getElementById('modalRoot').children.length){data=structuredClone(merged);editingBase=structuredClone(merged);render()}
+ // Each queued write uses the last *confirmed* server state as its base.
+ // Never advance editingBase before the transaction succeeds.
+ saveQueue=saveQueue.catch(()=>{}).then(async()=>{
+   const base=structuredClone(editingBase||snapshot);
+   const merged=await window.voyageCloud.saveTrip(id,snapshot,base);
+   if(activeTripId===id){
+     editingBase=structuredClone(merged);
+     // Preserve local changes made while this write was in flight.
+     if(pendingWrites===1&&!document.getElementById('modalRoot').children.length){
+       data=structuredClone(merged);render();
+     }
+   }
    saveError=false;
- }).catch(e=>{saveError=true;const label=document.getElementById('clouduser');if(label)label.textContent='⚠ Belum tersimpan';alert('Perubahan belum tersimpan: '+e.message+'\nJangan lanjut mengedit sebelum masalah diselesaikan.');}).finally(()=>{
+ }).catch(e=>{
+   saveError=true;const status=document.getElementById('clouduser');
+   if(status)status.textContent='⚠ Belum tersimpan';
+   alert('Perubahan belum tersimpan: '+e.message+'\nData yang belum tersimpan masih ada di layar. Jangan refresh sebelum diperiksa.');
+ }).finally(()=>{
    pendingWrites=Math.max(0,pendingWrites-1);cloudSaving=pendingWrites>0;
-   if(!pendingWrites){if(remoteRevision&&activeTripId===id)applyRemoteRevision();else if(!saveError){const label=document.getElementById('clouduser');if(label)label.textContent='✓ Tersimpan & sinkron'}}
+   if(!pendingWrites){
+     if(remoteRevision&&activeTripId===id&&!saveError)applyRemoteRevision();
+     else if(!saveError){const status=document.getElementById('clouduser');if(status)status.textContent='✓ Tersimpan & sinkron';}
+   }
  });
 };
-function applyRemoteRevision(){if(!remoteRevision||pendingWrites||document.getElementById('modalRoot').children.length)return;const r=remoteRevision;remoteRevision=null;if(r.deletedAt){if(activeTripId===r.id){if(liveTripStop){liveTripStop();liveTripStop=null}activeTripId=null;const next=tripList.find(t=>!t.deletedAt&&t.id!==r.id);if(next)switchTrip(next.id).catch(console.error);else{tab='history';tripFilter='deleted';render()}}return;}if(r.id!==activeTripId||!r.payload)return;const prev=selectedDay;data=structuredClone(r.payload);editingBase=structuredClone(r.payload);tripMeta={ownerId:r.ownerId,memberIds:r.memberIds||[]};ensureV3();selectedDay=days().some(([d])=>d===prev)?prev:data.trip.start;render();}
+function applyRemoteRevision(){if(!remoteRevision||pendingWrites||saveError||document.getElementById('modalRoot').children.length)return;const r=remoteRevision;remoteRevision=null;if(r.deletedAt){if(activeTripId===r.id){if(liveTripStop){liveTripStop();liveTripStop=null}activeTripId=null;const next=tripList.find(t=>!t.deletedAt&&t.id!==r.id);if(next)switchTrip(next.id).catch(console.error);else{tab='history';tripFilter='deleted';render()}}return;}if(r.id!==activeTripId||!r.payload)return;const prev=selectedDay;data=structuredClone(r.payload);editingBase=structuredClone(r.payload);tripMeta={ownerId:r.ownerId,memberIds:r.memberIds||[]};ensureV3();selectedDay=days().some(([d])=>d===prev)?prev:data.trip.start;render();}
 function receiveLiveTrip(r){if(!r||r.id!==activeTripId)return;if(r._pendingLocal)return;remoteRevision=r;applyRemoteRevision();}
 function receiveLiveTrips(items){tripList=items;if(tab==='history')render();if(activeTripId&&!items.some(t=>t.id===activeTripId&&!t.deletedAt)){if(!pendingWrites){const next=items.find(t=>!t.deletedAt);if(next)switchTrip(next.id).catch(console.error);else{activeTripId=null;tab='history';tripFilter='deleted';render();}}}}
 function closeLiveListeners(){if(liveTripStop){liveTripStop();liveTripStop=null}if(liveListStop){liveListStop();liveListStop=null}remoteRevision=null;}
